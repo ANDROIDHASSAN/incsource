@@ -1,0 +1,25 @@
+node_modules/
+dist/
+build/
+.env
+.env.local
+*.log
+.DS_Store
+coverage/
+.vite/
+
+# Local persistent MongoDB data (auth/accounts)
+server/.localdb/
+
+# Daily usage counters (email/groq)
+server/.usage.json
+server/.usage.test*.json
+
+# Any stray env files (defense in depth — never commit secrets)
+.env.*
+!.env.example
+
+# Playwright/dev artifacts (screenshots, PDFs, exported candidate CSVs with PII)
+.playwright-mcp/
+*.png
+*.csv
