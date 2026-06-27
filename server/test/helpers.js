@@ -32,6 +32,12 @@ export async function login(url, creds = ADMIN) {
   return data.token;
 }
 
+/** The signed-in user (incl. orgId/role) for a token. */
+export async function getMe(url, token) {
+  const res = await fetch(`${url}/api/auth/me`, { headers: { Authorization: `Bearer ${token}` } });
+  return (await res.json()).user;
+}
+
 /** Headers for an authenticated JSON request. */
 export const authHeaders = (token) => ({
   'Content-Type': 'application/json',

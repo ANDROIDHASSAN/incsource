@@ -7,7 +7,9 @@ const userSchema = new mongoose.Schema(
     passwordHash: { type: String, required: true },
     name: { type: String, default: '' },
     company: { type: String, default: '' },
-    role: { type: String, enum: ['recruiter', 'admin'], default: 'recruiter' },
+    // Tenant the user belongs to, and what they can do within it.
+    orgId: { type: String, index: true },
+    role: { type: String, enum: ['viewer', 'recruiter', 'admin'], default: 'recruiter' },
     lastLoginAt: Date,
   },
   { timestamps: true }
@@ -20,6 +22,7 @@ userSchema.methods.toSafeJSON = function toSafeJSON() {
     email: this.email,
     name: this.name,
     company: this.company,
+    orgId: this.orgId,
     role: this.role,
     createdAt: this.createdAt,
   };

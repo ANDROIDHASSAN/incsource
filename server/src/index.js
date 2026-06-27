@@ -20,8 +20,10 @@ async function main() {
     console.warn('⚠️  AUTH_SECRET not set — using the insecure dev default. Set AUTH_SECRET before deploying.');
   }
 
-  await initStore();
-  await seedDefaultUser();
+  const store = await initStore();
+  const seedOrgId = await seedDefaultUser();
+  // Backfill any pre-multi-tenancy rows so an existing deployment keeps working.
+  await store.migrateTenancy?.(seedOrgId);
 
   createApp().listen(config.port, () => {
     console.log(`\n🚀 IncSource API on http://localhost:${config.port}`);

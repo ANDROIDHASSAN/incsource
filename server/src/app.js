@@ -6,7 +6,7 @@ import express from 'express';
 import cors from 'cors';
 import { usingApify, usingAI } from './config.js';
 import { dbState } from './store/index.js';
-import { notFound, errorHandler, apiKeyAuth, requireAuth } from './middleware/index.js';
+import { notFound, errorHandler, apiKeyAuth, requireAuth, securityHeaders, requestLogger } from './middleware/index.js';
 
 import { authRouter } from './routes/auth.js';
 import { candidatesRouter } from './routes/candidates.js';
@@ -18,6 +18,7 @@ import { templatesRouter } from './routes/templates.js';
 import { emailRouter } from './routes/email.js';
 import { settingsRouter } from './routes/settings.js';
 import { usageRouter } from './routes/usage.js';
+import { orgRouter } from './routes/org.js';
 
 // Allowed CORS origins: an explicit allowlist in production (CORS_ORIGIN, comma-
 // separated), or fully open in dev so the Vite dev server / local tools just work.
@@ -31,6 +32,9 @@ function corsOptions() {
 export function createApp() {
   const app = express();
   app.set('trust proxy', 1);
+  app.disable('x-powered-by');
+  app.use(securityHeaders());
+  app.use(requestLogger());
   app.use(cors(corsOptions()));
   app.use(express.json({ limit: '2mb' }));
 
@@ -66,6 +70,7 @@ export function createApp() {
   app.use('/api/email', gate, emailRouter);
   app.use('/api/settings', gate, settingsRouter);
   app.use('/api/usage', gate, usageRouter);
+  app.use('/api/org', gate, orgRouter);
 
   app.use('/api', notFound);
   app.use(errorHandler);

@@ -9,7 +9,7 @@ const DEMO = { email: 'admin@incsource.com', password: 'incsource123' };
 
 export function Auth({ onAuthed }) {
   const [mode, setMode] = useState('login'); // 'login' | 'register'
-  const [form, setForm] = useState({ email: '', password: '', name: '', company: '' });
+  const [form, setForm] = useState({ email: '', password: '', name: '', company: '', inviteCode: '' });
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -67,6 +67,8 @@ export function Auth({ onAuthed }) {
               <input className="input full" value={form.name} onChange={set('name')} placeholder="Asha Rao" autoComplete="name" />
               <label className="field-label">Company</label>
               <input className="input full" value={form.company} onChange={set('company')} placeholder="inCruiter" autoComplete="organization" />
+              <label className="field-label">Team invite code <span className="muted sm">(optional)</span></label>
+              <input className="input full" value={form.inviteCode} onChange={set('inviteCode')} placeholder="Paste a code to join your team — or leave blank to start a new workspace" autoComplete="off" />
             </>
           )}
 

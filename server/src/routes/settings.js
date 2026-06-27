@@ -1,10 +1,13 @@
 import { Router } from 'express';
 import fs from 'fs';
 import path from 'path';
-import { asyncHandler, requireAuth } from '../middleware/index.js';
+import { asyncHandler, requireRole } from '../middleware/index.js';
 import { applySettings, settingsStatus, revealSettings, config } from '../config.js';
+import { audit } from '../services/audit.js';
 
 export const settingsRouter = Router();
+// API keys are deployment-wide credentials — only an org admin may view or change them.
+const adminOnly = requireRole('admin');
 
 const ENV_PATH = path.resolve(process.cwd(), '.env');
 
@@ -23,10 +26,10 @@ function persistEnv(updates) {
 
 settingsRouter.get('/', (_req, res) => res.json(settingsStatus()));
 
-// Raw keys for the eye-reveal / pre-fill. Requires a signed-in user.
-settingsRouter.get('/reveal', requireAuth(), (_req, res) => res.json(revealSettings()));
+// Raw keys for the eye-reveal / pre-fill. Admins only.
+settingsRouter.get('/reveal', adminOnly, (_req, res) => res.json(revealSettings()));
 
-settingsRouter.post('/', asyncHandler(async (req, res) => {
+settingsRouter.post('/', adminOnly, asyncHandler(async (req, res) => {
   const groqKey = typeof req.body?.groqKey === 'string' ? req.body.groqKey.trim() : undefined;
   const groqModel = typeof req.body?.groqModel === 'string' ? req.body.groqModel.trim() : undefined;
   const apifyToken = typeof req.body?.apifyToken === 'string' ? req.body.apifyToken.trim() : undefined;
@@ -34,6 +37,7 @@ settingsRouter.post('/', asyncHandler(async (req, res) => {
   // Save whatever the user provides — we never block on key format. If a key is
   // wrong, the real provider call will report it; we don't pre-judge the prefix.
   applySettings({ groqKey, groqModel, apifyToken });
+  audit(req, 'settings.update', { changed: Object.keys({ ...(groqKey !== undefined && { groqKey: 1 }), ...(apifyToken !== undefined && { apifyToken: 1 }), ...(groqModel && { groqModel: 1 }) }) });
   // Persist (empty value clears it).
   persistEnv({
     ...(groqKey !== undefined ? { GROQ_API_KEY: groqKey } : {}),

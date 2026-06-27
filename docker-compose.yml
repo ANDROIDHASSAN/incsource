@@ -1,0 +1,51 @@
+# Docker Compose stack for the Incruiter MERN monorepo.
+#
+#   mongo  -> MongoDB database (persisted via a named volume)
+#   server -> Express API (depends on a healthy mongo)
+#   client -> Static SPA served by nginx, proxying /api/ to server
+#
+# Usage:
+#   docker compose up --build
+#   Client:  http://localhost:8080
+#   API:     http://localhost:4000/api/health
+
+services:
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      # Marks mongo "healthy" only once it can answer a ping.
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  server:
+    build: ./server
+    restart: unless-stopped
+    depends_on:
+      mongo:
+        condition: service_healthy
+    # Application secrets/config (AUTH_SECRET, APIFY_TOKEN, SMTP_*, etc.).
+    env_file:
+      - ./server/.env
+    environment:
+      # Point the API at the mongo service on the compose network.
+      # This overrides any MONGODB_URI defined in the env file.
+      MONGODB_URI: mongodb://mongo:27017/incsource
+    ports:
+      - "4000:4000"
+
+  client:
+    build: ./client
+    restart: unless-stopped
+    depends_on:
+      - server
+    ports:
+      - "8080:80"
+
+volumes:
+  mongo-data:

@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { store } from '../store/index.js';
 import { config } from '../config.js';
-import { asyncHandler, rateLimit } from '../middleware/index.js';
+import { asyncHandler, rateLimit, requireRole } from '../middleware/index.js';
 import { TEMPLATES, renderTemplate } from '../services/outreach.js';
 import { sendEmail, emailStatus } from '../services/emailService.js';
 import { usage, emailCap, emailRemaining } from '../services/usage.js';
@@ -12,27 +12,28 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // A randomized gap between sends so a campaign doesn't go out as one suspicious
 // rapid burst (a common spam/abuse trigger that gets free accounts banned).
 const safeGap = () => config.email.throttleMs + Math.floor(Math.random() * config.email.jitterMs);
+const canSend = requireRole('recruiter');
 
 emailRouter.get('/status', asyncHandler(async (_req, res) => {
-  res.json({ ...(await emailStatus()), sentToday: usage.emailsToday(), dailyCap: emailCap(), remaining: emailRemaining() });
+  res.json({ ...emailStatus(), sentToday: usage.emailsToday(), dailyCap: emailCap(), remaining: emailRemaining() });
 }));
 
-// Resolve { subject, body } from a templateId (built-in or custom) or raw subject/body,
-// then personalize for the candidate.
-async function compose(body, candidate) {
+// Resolve { subject, body } from a templateId (built-in or this org's custom) or
+// raw subject/body, then personalize for the candidate.
+async function compose(body, candidate, orgId) {
   let tpl;
   if (body.subject != null || body.body != null) {
     tpl = { subject: body.subject || '', body: body.body || '' };
   } else {
-    const all = [...TEMPLATES, ...(await store.listTemplates())];
+    const all = [...TEMPLATES, ...(await store.listTemplates(orgId))];
     tpl = all.find((t) => t.id === body.templateId) || TEMPLATES[0];
   }
   return renderTemplate(tpl, candidate, { role: body.role, recruiter: body.recruiter, company: body.company });
 }
 
 // Send to a single candidate.
-emailRouter.post('/send/:id', rateLimit({ windowMs: 60_000, max: 60 }), asyncHandler(async (req, res) => {
-  const c = await store.getCandidate(req.params.id);
+emailRouter.post('/send/:id', canSend, rateLimit({ windowMs: 60_000, max: 60 }), asyncHandler(async (req, res) => {
+  const c = await store.getCandidate(req.params.id, req.user.orgId);
   if (!c) return res.status(404).json({ error: 'Not found' });
   if (!c.email) return res.status(400).json({ error: 'Candidate has no email — run Find email & phone first.' });
   // Daily ban-safety cap.
@@ -40,21 +41,21 @@ emailRouter.post('/send/:id', rateLimit({ windowMs: 60_000, max: 60 }), asyncHan
     return res.status(429).json({ error: `Daily email limit reached (${emailCap()}/day). Resets tomorrow — protects your sending account from being flagged.` });
   }
 
-  const msg = await compose(req.body || {}, c);
+  const msg = await compose(req.body || {}, c, req.user.orgId);
   const result = await sendEmail({ to: c.email, subject: msg.subject, text: msg.body });
   if (!result.ok) return res.status(502).json({ error: result.error });
   usage.incEmail();
 
-  const updated = await store.recordOutreach(c.id, { channel: 'email', subject: msg.subject });
+  const updated = await store.recordOutreach(c.id, { channel: 'email', subject: msg.subject }, req.user.orgId);
   res.json({ ok: true, previewUrl: result.previewUrl, candidate: updated, remaining: emailRemaining() });
 }));
 
 // Bulk campaign — throttled sequential send to selected candidates with an email.
-emailRouter.post('/campaign', rateLimit({ windowMs: 60_000, max: 4 }), asyncHandler(async (req, res) => {
+emailRouter.post('/campaign', canSend, rateLimit({ windowMs: 60_000, max: 4 }), asyncHandler(async (req, res) => {
   const ids = (Array.isArray(req.body?.ids) ? req.body.ids : []).slice(0, 500);
   if (!ids.length) return res.status(400).json({ error: 'No recipients selected' });
 
-  const list = (await Promise.all(ids.map((id) => store.getCandidate(id)))).filter(Boolean);
+  const list = (await Promise.all(ids.map((id) => store.getCandidate(id, req.user.orgId)))).filter(Boolean);
   const withEmail = list.filter((c) => c.email);
   const results = [];
   let sent = 0, skipped = list.length - withEmail.length, failed = 0, capped = 0;
@@ -69,12 +70,12 @@ emailRouter.post('/campaign', rateLimit({ windowMs: 60_000, max: 4 }), asyncHand
 
   for (const c of withEmail) {
     if (remaining <= 0) { capped++; results.push({ id: c.id, name: c.fullName, status: 'capped', reason: 'daily limit' }); continue; }
-    const msg = await compose(req.body || {}, c);
+    const msg = await compose(req.body || {}, c, req.user.orgId);
     const r = await sendEmail({ to: c.email, subject: msg.subject, text: msg.body });
     if (r.ok) {
       usage.incEmail();
       remaining = emailRemaining();
-      await store.recordOutreach(c.id, { channel: 'email', subject: msg.subject });
+      await store.recordOutreach(c.id, { channel: 'email', subject: msg.subject }, req.user.orgId);
       sent++;
       results.push({ id: c.id, name: c.fullName, status: 'sent', previewUrl: r.previewUrl });
     } else {

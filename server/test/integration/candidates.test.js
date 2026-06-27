@@ -1,26 +1,28 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { startTestServer, login, api } from '../helpers.js';
+import { startTestServer, login, getMe, api } from '../helpers.js';
 import { store } from '../../src/store/index.js';
 import { ensureShape, dedupeKey } from '../../src/services/normalize.js';
 import { scoreActiveIntent } from '../../src/services/activeSignal.js';
 
-// Build a fully-shaped, scored candidate and seed it straight into the store.
-function seed(over) {
+// Build a fully-shaped, scored, org-tagged candidate and seed it into the store.
+function seed(orgId, over) {
   const c = ensureShape({ source: 'inbound', ...over }, 'inbound');
   Object.assign(c, scoreActiveIntent(c));
   if (over.fitScore != null) c.fitScore = over.fitScore;
+  c.orgId = orgId;
   c.dedupeKey = dedupeKey(c);
   return c;
 }
 
-let srv, token;
+let srv, token, orgId;
 before(async () => {
   srv = await startTestServer();
   token = await login(srv.url);
+  orgId = (await getMe(srv.url, token)).orgId;
   await store.upsertCandidates([
-    seed({ fullName: 'Open One', email: 'open1@x.com', openToWork: true, fitScore: 95, city: 'Pune', state: 'Maharashtra', countryCode: 'IN', skills: ['React', 'Node.js'], experienceYears: 4 }),
-    seed({ fullName: 'Closed Two', email: 'closed2@x.com', openToWork: false, fitScore: 60, city: 'Mumbai', state: 'Maharashtra', countryCode: 'IN', skills: ['Vue'], experienceYears: 6 }),
+    seed(orgId, { fullName: 'Open One', email: 'open1@x.com', openToWork: true, fitScore: 95, city: 'Pune', state: 'Maharashtra', countryCode: 'IN', skills: ['React', 'Node.js'], experienceYears: 4 }),
+    seed(orgId, { fullName: 'Closed Two', email: 'closed2@x.com', openToWork: false, fitScore: 60, city: 'Mumbai', state: 'Maharashtra', countryCode: 'IN', skills: ['Vue'], experienceYears: 6 }),
   ]);
 });
 after(async () => { await srv.close(); });
@@ -98,7 +100,7 @@ describe('CSV export', () => {
 
 describe('GDPR delete', () => {
   it('deletes a candidate by id', async () => {
-    await store.upsertCandidates([seed({ fullName: 'Delete Me', email: 'del@x.com' })]);
+    await store.upsertCandidates([seed(orgId, { fullName: 'Delete Me', email: 'del@x.com' })]);
     const { body } = await api(srv.url, 'GET', '/api/candidates?q=Delete Me&limit=1', { token });
     const id = body.candidates[0].id;
     const del = await api(srv.url, 'DELETE', `/api/candidates/${id}`, { token });

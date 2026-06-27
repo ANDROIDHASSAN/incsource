@@ -1,0 +1,24 @@
+# Dependencies (reinstalled inside the image via npm ci)
+node_modules
+
+# Secrets and environment files — never bake these into an image
+.env
+.env.*
+
+# Local development database / state
+.localdb
+.usage*.json
+
+# Tests are not needed in the production runtime image
+test
+
+# Logs
+*.log
+
+# Version control
+.git
+.gitignore
+
+# Docker artifacts
+Dockerfile
+.dockerignore

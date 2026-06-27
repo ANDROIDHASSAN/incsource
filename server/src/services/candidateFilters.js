@@ -32,6 +32,8 @@ export function normalizeFilters(p = {}) {
   const band = p.band && BANDS[p.band] ? p.band : undefined;
   const [bandMin, bandMax] = band ? BANDS[band] : [];
   return {
+    // Tenant scope — set server-side from the caller's token, never from user query.
+    orgId: p.orgId || undefined,
     q: p.q ? String(p.q).trim().slice(0, 120) : undefined,
     minScore: band ? bandMin : num(p.minScore),
     maxScore: band ? bandMax : num(p.maxScore),
@@ -61,6 +63,7 @@ export function normalizeFilters(p = {}) {
 }
 
 export function matchesFilters(c, f) {
+  if (f.orgId && c.orgId !== f.orgId) return false; // tenant isolation
   if (f.q) {
     const hay = [c.fullName, c.headline, c.currentTitle, c.currentCompany, c.location, (c.skills || []).join(' '), (c.tags || []).join(' ')]
       .filter(Boolean).join(' ').toLowerCase();
@@ -110,6 +113,7 @@ export function toMongoQuery(f) {
   const and = []; // each entry is AND-ed together
   const q = {};
 
+  if (f.orgId) q.orgId = f.orgId; // tenant isolation
   if (f.q) {
     const rx = { $regex: escapeRx(f.q), $options: 'i' };
     and.push({ $or: [{ fullName: rx }, { headline: rx }, { currentTitle: rx }, { currentCompany: rx }, { location: rx }, { skills: rx }, { tags: rx }] });

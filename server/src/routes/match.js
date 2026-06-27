@@ -40,7 +40,7 @@ matchRouter.post('/upload', upload.single('file'), asyncHandler(async (req, res)
 
 // Parse a JD only (preview the extracted requirements).
 matchRouter.post('/parse', asyncHandler(async (req, res) => {
-  const { skills } = await store.facets();
+  const { skills } = await store.facets({ orgId: req.user.orgId });
   res.json(parseJD(req.body?.jd || '', (skills || []).map((s) => s.value)));
 }));
 
@@ -53,7 +53,8 @@ matchRouter.post(
     const jdText = String(req.body?.jd || '');
     if (jdText.trim().length < 20) return res.status(400).json({ error: 'Paste a fuller job description (min 20 chars).' });
 
-    const { skills } = await store.facets();
+    const orgId = req.user.orgId;
+    const { skills } = await store.facets({ orgId });
     const jd = parseJD(jdText, (skills || []).map((s) => s.value));
     if (req.body?.title) jd.title = String(req.body.title);
 
@@ -62,6 +63,7 @@ matchRouter.post(
       // Source fresh candidates for this exact role/location, then match.
       const q = [jd.title, ...(jd.skills || []).slice(0, 2)].filter(Boolean).join(' ');
       const run = await runSourcing({
+        orgId,
         sources: req.body.sources || ['linkedin-harvest', 'apify-linkedin'],
         query: q,
         location: jd.location || 'India',
@@ -72,7 +74,7 @@ matchRouter.post(
       sourced = { kept: run.run.kept, fetched: run.run.fetched };
     }
 
-    const { candidates } = await store.listCandidates({ limit: 500, includeLeads: false });
+    const { candidates } = await store.listCandidates({ limit: 500, includeLeads: false, orgId });
     const activeOnly = req.body?.activeOnly !== false;
     let matches = matchCandidates(candidates, jd, { activeOnly });
 

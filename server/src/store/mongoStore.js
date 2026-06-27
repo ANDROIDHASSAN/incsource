@@ -7,7 +7,8 @@ const EDITABLE = ['status', 'starred', 'notes', 'tags'];
 
 const candidateSchema = new mongoose.Schema(
   {
-    dedupeKey: { type: String, index: true, unique: true },
+    orgId: { type: String, index: true }, // tenant owner
+    dedupeKey: { type: String, index: true },
     source: String,
     sources: [String],
     recordType: { type: String, default: 'candidate' },
@@ -53,6 +54,7 @@ const candidateSchema = new mongoose.Schema(
 
 const runSchema = new mongoose.Schema(
   {
+    orgId: { type: String, index: true },
     name: String,
     sources: [String], query: String, location: String,
     brief: { type: mongoose.Schema.Types.Mixed },
@@ -70,9 +72,11 @@ const runSchema = new mongoose.Schema(
   { timestamps: true, suppressReservedKeysWarning: true, strict: false, minimize: false }
 );
 
-const segmentSchema = new mongoose.Schema({ name: String, filters: Object }, { timestamps: true });
-const templateSchema = new mongoose.Schema({ name: String, subject: String, body: String }, { timestamps: true });
+const segmentSchema = new mongoose.Schema({ orgId: { type: String, index: true }, name: String, filters: Object }, { timestamps: true });
+const templateSchema = new mongoose.Schema({ orgId: { type: String, index: true }, name: String, subject: String, body: String }, { timestamps: true });
 
+// A profile is unique PER TENANT — two orgs may each hold the same candidate.
+candidateSchema.index({ orgId: 1, dedupeKey: 1 }, { unique: true });
 const Candidate = mongoose.model('Candidate', candidateSchema);
 const Run = mongoose.model('SourcingRun', runSchema);
 const Segment = mongoose.model('Segment', segmentSchema);
@@ -87,6 +91,10 @@ function out(doc) {
   return o;
 }
 
+// Build an id query scoped to a tenant (omit orgId for internal/unscoped calls).
+const scopeId = (id, orgId) => (orgId ? { _id: id, orgId } : { _id: id });
+const scopeIds = (ids, orgId) => (orgId ? { _id: { $in: ids }, orgId } : { _id: { $in: ids } });
+
 export const mongoStore = {
   kind: 'mongo',
 
@@ -96,6 +104,23 @@ export const mongoStore = {
       { status: { $exists: false } },
       { $set: { status: 'New', starred: false, notes: '', tags: [], outreachCount: 0, outreachLog: [] } }
     );
+  },
+
+  // One-time tenancy migration for databases created before multi-tenancy: assign
+  // any org-less rows to the given (seed admin's) org, and drop the now-stale
+  // single-field unique dedupe index in favour of the per-tenant compound one.
+  async migrateTenancy(orgId) {
+    if (!orgId) return { migrated: 0 };
+    try { await Candidate.collection.dropIndex('dedupeKey_1'); } catch { /* not present → fine */ }
+    const set = { $set: { orgId } };
+    const where = { $or: [{ orgId: { $exists: false } }, { orgId: null }] };
+    const [c] = await Promise.all([
+      Candidate.updateMany(where, set),
+      Run.updateMany(where, set),
+      Segment.updateMany(where, set),
+      Template.updateMany(where, set),
+    ]);
+    return { migrated: c.modifiedCount ?? 0 };
   },
 
   async upsertCandidates(list) {
@@ -119,20 +144,21 @@ export const mongoStore = {
       if (c.phone) set.phone = c.phone;
       if (c.openToWork) set.openToWork = true; // OR-merge: only ever set true
 
-      const setOnInsert = { status: 'New', starred: false, notes: '', tags: [] };
+      const setOnInsert = { status: 'New', starred: false, notes: '', tags: [], orgId: c.orgId ?? null };
       if (!c.openToWork) setOnInsert.openToWork = false; // avoid $set/$setOnInsert conflict
 
       return {
         updateOne: {
-          filter: { dedupeKey: c.dedupeKey },
+          filter: { orgId: c.orgId ?? null, dedupeKey: c.dedupeKey },
           update: { $set: set, $setOnInsert: setOnInsert, $max: { activeScore: c.activeScore || 0 }, $addToSet: { sources: c.source } },
           upsert: true,
         },
       };
     });
     const res = await Candidate.bulkWrite(ops, { ordered: false });
+    const orgId = list[0]?.orgId ?? null;
     const keys = list.map((c) => c.dedupeKey);
-    const docs = await Candidate.find({ dedupeKey: { $in: keys } }, '_id').lean();
+    const docs = await Candidate.find({ orgId, dedupeKey: { $in: keys } }, '_id').lean();
     const ids = docs.map((d) => String(d._id));
     return { inserted: res.upsertedCount || 0, updated: res.modifiedCount || 0, ids };
   },
@@ -151,31 +177,31 @@ export const mongoStore = {
     return { candidates: docs.map(out), total };
   },
 
-  async getCandidate(id) {
+  async getCandidate(id, orgId) {
     if (!mongoose.isValidObjectId(id)) return null;
-    return out(await Candidate.findById(id));
+    return out(await Candidate.findOne(scopeId(id, orgId)));
   },
 
-  async updateCandidate(id, patch) {
+  async updateCandidate(id, patch, orgId) {
     if (!mongoose.isValidObjectId(id)) return null;
     const set = {};
     for (const k of EDITABLE) if (k in patch) set[k] = patch[k];
-    return out(await Candidate.findByIdAndUpdate(id, { $set: set }, { new: true }));
+    return out(await Candidate.findOneAndUpdate(scopeId(id, orgId), { $set: set }, { new: true }));
   },
 
-  async bulkUpdate(ids, patch) {
+  async bulkUpdate(ids, patch, orgId) {
     const valid = ids.filter((i) => mongoose.isValidObjectId(i));
     const set = {};
     for (const k of EDITABLE) if (k in patch) set[k] = patch[k];
-    const res = await Candidate.updateMany({ _id: { $in: valid } }, { $set: set });
+    const res = await Candidate.updateMany(scopeIds(valid, orgId), { $set: set });
     return res.modifiedCount ?? res.nModified ?? 0;
   },
 
   // Recompute the active-intent score for every stored candidate using the current
   // scoring model (scoreFn). Used after a weight change so the existing pool reflects
   // it without re-sourcing. Workflow fields (status/notes/stars/openToWork) untouched.
-  async rescoreAll(scoreFn) {
-    const docs = await Candidate.find({});
+  async rescoreAll(scoreFn, orgId) {
+    const docs = await Candidate.find(orgId ? { orgId } : {});
     const ops = [];
     for (const d of docs) {
       const { activeScore, scoreBreakdown, rawSignals } = scoreFn(out(d));
@@ -190,18 +216,18 @@ export const mongoStore = {
     return { rescored: ops.length };
   },
 
-  async setContact(id, { email, phone }) {
+  async setContact(id, { email, phone }, orgId) {
     if (!mongoose.isValidObjectId(id)) return null;
     const set = {};
     if (email) set.email = email;
     if (phone) set.phone = phone;
-    if (!Object.keys(set).length) return out(await Candidate.findById(id));
-    return out(await Candidate.findByIdAndUpdate(id, { $set: set }, { new: true }));
+    if (!Object.keys(set).length) return out(await Candidate.findOne(scopeId(id, orgId)));
+    return out(await Candidate.findOneAndUpdate(scopeId(id, orgId), { $set: set }, { new: true }));
   },
 
-  async recordOutreach(id, { channel, subject }) {
+  async recordOutreach(id, { channel, subject }, orgId) {
     if (!mongoose.isValidObjectId(id)) return null;
-    const existing = await Candidate.findById(id);
+    const existing = await Candidate.findOne(scopeId(id, orgId));
     if (!existing) return null;
     const update = {
       $push: { outreachLog: { $each: [{ channel, subject, at: new Date() }], $position: 0, $slice: 50 } },
@@ -209,22 +235,23 @@ export const mongoStore = {
       $set: { lastContactedAt: new Date() },
     };
     if (existing.status === 'New' || existing.status === 'Shortlisted') update.$set.status = 'Contacted';
-    return out(await Candidate.findByIdAndUpdate(id, update, { new: true }));
+    return out(await Candidate.findOneAndUpdate(scopeId(id, orgId), update, { new: true }));
   },
 
-  async deleteCandidate(id) {
+  async deleteCandidate(id, orgId) {
     if (!mongoose.isValidObjectId(id)) return false;
-    return Boolean(await Candidate.findByIdAndDelete(id));
+    return Boolean(await Candidate.findOneAndDelete(scopeId(id, orgId)));
   },
 
-  async bulkDelete(ids) {
+  async bulkDelete(ids, orgId) {
     const valid = ids.filter((i) => mongoose.isValidObjectId(i));
-    const res = await Candidate.deleteMany({ _id: { $in: valid } });
+    const res = await Candidate.deleteMany(scopeIds(valid, orgId));
     return res.deletedCount || 0;
   },
 
-  async stats() {
-    const base = { recordType: { $ne: 'job-lead' } };
+  async stats(params = {}) {
+    const { orgId } = normalizeFilters(params);
+    const base = { recordType: { $ne: 'job-lead' }, ...(orgId ? { orgId } : {}) };
     const [total, openToWork, hot, shortlisted] = await Promise.all([
       Candidate.countDocuments(base),
       Candidate.countDocuments({ ...base, openToWork: true }),
@@ -268,12 +295,14 @@ export const mongoStore = {
     };
   },
 
-  async facets() {
+  async facets(params = {}) {
+    const { orgId } = normalizeFilters(params);
+    const scope = orgId ? { orgId } : {};
     const top = async (field, limit = 1000) => {
       const path = field === 'source' ? 'sources' : field;
       const isArray = field === 'skills' || field === 'source';
       const rows = await Candidate.aggregate([
-        { $match: { [path]: isArray ? { $exists: true, $ne: [] } : { $nin: [null, ''] } } },
+        { $match: { ...scope, [path]: isArray ? { $exists: true, $ne: [] } : { $nin: [null, ''] } } },
         ...(isArray ? [{ $unwind: `$${path}` }] : []),
         { $group: { _id: `$${path}`, count: { $sum: 1 } } },
         { $sort: { count: -1 } },
@@ -288,51 +317,51 @@ export const mongoStore = {
   async saveRun(run) {
     return out(await Run.create(run));
   },
-  async listRuns(limit = 50) {
-    const docs = await Run.find().select('-candidateIds').sort('-createdAt').limit(limit);
+  async listRuns(limit = 50, orgId) {
+    const docs = await Run.find(orgId ? { orgId } : {}).select('-candidateIds').sort('-createdAt').limit(limit);
     return docs.map((d) => { const o = out(d); o.candidateCount = d.kept || 0; return o; });
   },
-  async getRun(id) {
+  async getRun(id, orgId) {
     if (!mongoose.isValidObjectId(id)) return null;
-    return out(await Run.findById(id));
+    return out(await Run.findOne(scopeId(id, orgId)));
   },
-  async updateRun(id, patch) {
+  async updateRun(id, patch, orgId) {
     if (!mongoose.isValidObjectId(id)) return null;
     const set = {};
     if (typeof patch.name === 'string') set.name = patch.name;
-    return out(await Run.findByIdAndUpdate(id, { $set: set }, { new: true }));
+    return out(await Run.findOneAndUpdate(scopeId(id, orgId), { $set: set }, { new: true }));
   },
-  async deleteRun(id) {
+  async deleteRun(id, orgId) {
     if (!mongoose.isValidObjectId(id)) return false;
-    return Boolean(await Run.findByIdAndDelete(id));
+    return Boolean(await Run.findOneAndDelete(scopeId(id, orgId)));
   },
 
-  async listSegments() {
-    return (await Segment.find().sort('-createdAt')).map(out);
+  async listSegments(orgId) {
+    return (await Segment.find(orgId ? { orgId } : {}).sort('-createdAt')).map(out);
   },
-  async saveSegment(name, filters) {
-    return out(await Segment.create({ name, filters }));
+  async saveSegment(name, filters, orgId) {
+    return out(await Segment.create({ name, filters, orgId }));
   },
-  async deleteSegment(id) {
+  async deleteSegment(id, orgId) {
     if (!mongoose.isValidObjectId(id)) return false;
-    return Boolean(await Segment.findByIdAndDelete(id));
+    return Boolean(await Segment.findOneAndDelete(scopeId(id, orgId)));
   },
 
-  async listTemplates() {
-    return (await Template.find().sort('-createdAt')).map((d) => ({ ...out(d), custom: true }));
+  async listTemplates(orgId) {
+    return (await Template.find(orgId ? { orgId } : {}).sort('-createdAt')).map((d) => ({ ...out(d), custom: true }));
   },
-  async saveTemplate({ name, subject, body }) {
-    return { ...out(await Template.create({ name, subject, body })), custom: true };
+  async saveTemplate({ name, subject, body, orgId }) {
+    return { ...out(await Template.create({ name, subject, body, orgId })), custom: true };
   },
-  async updateTemplate(id, patch) {
+  async updateTemplate(id, patch, orgId) {
     if (!mongoose.isValidObjectId(id)) return null;
     const set = {};
     for (const k of ['name', 'subject', 'body']) if (k in patch) set[k] = patch[k];
-    const d = await Template.findByIdAndUpdate(id, { $set: set }, { new: true });
+    const d = await Template.findOneAndUpdate(scopeId(id, orgId), { $set: set }, { new: true });
     return d ? { ...out(d), custom: true } : null;
   },
-  async deleteTemplate(id) {
+  async deleteTemplate(id, orgId) {
     if (!mongoose.isValidObjectId(id)) return false;
-    return Boolean(await Template.findByIdAndDelete(id));
+    return Boolean(await Template.findOneAndDelete(scopeId(id, orgId)));
   },
 };

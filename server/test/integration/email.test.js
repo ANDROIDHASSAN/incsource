@@ -1,12 +1,13 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { startTestServer, login, api } from '../helpers.js';
+import { startTestServer, login, getMe, api } from '../helpers.js';
 import { store } from '../../src/store/index.js';
 import { ensureShape, dedupeKey } from '../../src/services/normalize.js';
 import { usage, emailCap } from '../../src/services/usage.js';
 
-function seed(over) {
+function seed(orgId, over) {
   const c = ensureShape({ source: 'inbound', ...over }, 'inbound');
+  c.orgId = orgId;
   c.dedupeKey = dedupeKey(c);
   return c;
 }
@@ -15,9 +16,10 @@ let srv, token, withEmailId, noEmailId;
 before(async () => {
   srv = await startTestServer();
   token = await login(srv.url);
+  const orgId = (await getMe(srv.url, token)).orgId;
   const { ids } = await store.upsertCandidates([
-    seed({ fullName: 'Has Email', email: 'has@x.com' }),
-    seed({ fullName: 'No Email' }),
+    seed(orgId, { fullName: 'Has Email', email: 'has@x.com' }),
+    seed(orgId, { fullName: 'No Email' }),
   ]);
   [withEmailId, noEmailId] = ids;
 });

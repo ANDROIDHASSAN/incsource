@@ -199,6 +199,7 @@ function roleVariants(q) {
  * runs one relaxed top-up pass if a narrow brief comes up short).
  */
 export async function runSourcing({
+  orgId = null,
   sources,
   query = '',
   limit = 25,
@@ -491,10 +492,13 @@ export async function runSourcing({
     contacts = await enrichContacts(finalList.slice(0, config.apify.contactBulkCap));
   }
 
+  // Stamp the tenant on every candidate so the pool stays isolated per org.
+  for (const c of finalList) c.orgId = orgId;
   const { inserted, updated, ids } = await store.upsertCandidates(finalList);
 
   const defaultName = [query || 'All roles', location].filter(Boolean).join(' · ');
   const run = {
+    orgId,
     name: (sessionName || defaultName).slice(0, 80),
     sources: chosen,
     query,
