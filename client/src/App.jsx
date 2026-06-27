@@ -14,6 +14,7 @@ import { SessionsMenu } from './components/SessionsMenu.jsx';
 import { SourcingBrief } from './components/SourcingBrief.jsx';
 import { Settings } from './components/Settings.jsx';
 import { Usage } from './components/Usage.jsx';
+import { Assistant } from './components/Assistant.jsx';
 
 const initials = (u) => {
   const base = (u?.name || u?.email || '?').trim();
@@ -127,6 +128,7 @@ export default function App({ user, onLogout }) {
   const [tplOpen, setTplOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [usageOpen, setUsageOpen] = useState(false);
+  const [assistantOpen, setAssistantOpen] = useState(false);
   const [aiOn, setAiOn] = useState(false);
   const [campaignOpen, setCampaignOpen] = useState(false);
   const [suiteOpen, setSuiteOpen] = useState(false);
@@ -470,6 +472,7 @@ export default function App({ user, onLogout }) {
         </div>
         <div className="appbar-right">
           <SessionsMenu sessions={sessions} active={activeSession} onNew={newSession} onOpen={openSession} onExit={exitSession} onRename={renameSession} onDelete={deleteSession} />
+          <button className="btn sm primary assistant-btn" onClick={() => setAssistantOpen(true)}>✦ Ask AI</button>
           <button className="btn sm primary jd-btn" onClick={() => setJdOpen(true)}>✦ Match to JD</button>
           {/* Secondary tools tucked under one menu to keep the bar clean */}
           <div className="tools" onClick={() => setToolsOpen((o) => !o)}>
@@ -646,6 +649,19 @@ export default function App({ user, onLogout }) {
         <Settings onClose={() => setSettingsOpen(false)} onSaved={(s) => setAiOn(Boolean(s.ai))} toast={toast} />
       )}
       {usageOpen && <Usage onClose={() => setUsageOpen(false)} toast={toast} />}
+      {assistantOpen && (
+        <Assistant
+          sources={selected}
+          toast={toast}
+          onClose={() => setAssistantOpen(false)}
+          onComplete={(run) => {
+            // The agent finished a run — surface its results in the main view.
+            loadSessions();
+            if (run) { setFreshSession(false); setActiveSession(run); setLastRun(run); }
+            api.stats().then(setStats);
+          }}
+        />
+      )}
       {tplOpen && (
         <TemplateManager templates={templates} onChange={loadTemplates} onClose={() => setTplOpen(false)} toast={toast} />
       )}

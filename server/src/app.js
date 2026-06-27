@@ -19,6 +19,7 @@ import { emailRouter } from './routes/email.js';
 import { settingsRouter } from './routes/settings.js';
 import { usageRouter } from './routes/usage.js';
 import { orgRouter } from './routes/org.js';
+import { agentRouter } from './routes/agent.js';
 
 // Allowed CORS origins: an explicit allowlist in production (CORS_ORIGIN, comma-
 // separated), or fully open in dev so the Vite dev server / local tools just work.
@@ -71,6 +72,7 @@ export function createApp() {
   app.use('/api/settings', gate, settingsRouter);
   app.use('/api/usage', gate, usageRouter);
   app.use('/api/org', gate, orgRouter);
+  app.use('/api/agent', gate, agentRouter);
 
   app.use('/api', notFound);
   app.use(errorHandler);

@@ -119,6 +119,9 @@ export const api = {
   },
   match: (body) => fetch('/api/match', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(json),
 
+  // agentic assistant — one conversational turn → { reply, brief, ready }
+  agentChat: (messages) => fetch('/api/agent/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages }) }).then(json),
+
   // usage / quotas (email daily cap, Apify spend, Groq AI limits)
   usage: () => fetch('/api/usage').then(json),
 
