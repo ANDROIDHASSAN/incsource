@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import multer from 'multer';
 import { store } from '../store/index.js';
 import { PIPELINE_STAGES } from '../store/memoryStore.js';
 import { asyncHandler, rateLimit, requireRole } from '../middleware/index.js';
@@ -7,10 +8,15 @@ import { TEMPLATES, renderTemplate } from '../services/outreach.js';
 import { enrichContacts } from '../services/enrichContacts.js';
 import { EXPERIENCE_BANDS } from '../services/experience.js';
 import { scoreActiveIntent } from '../services/activeSignal.js';
+import { extractDocText, buildResumeRecord } from '../services/resumeText.js';
+import { resumeUploadUrl } from '../services/appUrl.js';
 import { audit } from '../services/audit.js';
 import { config } from '../config.js';
 
 export const candidatesRouter = Router();
+
+// In-memory upload (max 8MB) for recruiter-side resume uploads.
+const resumeUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 8 * 1024 * 1024 } });
 
 // Tenant scope from the caller's token — overrides any client-supplied orgId, so a
 // user can never read or mutate another org's data.
@@ -92,6 +98,42 @@ candidatesRouter.post('/enrich', canWrite, rateLimit({ windowMs: 60_000, max: 6 
   if (result.error) return res.status(502).json({ error: result.error });
   await Promise.all(list.map((c) => store.setContact(c.id, { email: c.email }, org(req))));
   res.json(result);
+}));
+
+// ── Resume collection ────────────────────────────────────────────────────────
+// Get (or lazily create) the candidate's public resume-upload link — the URL the
+// recruiter drops into outreach so the candidate can self-upload their CV.
+candidatesRouter.post('/:id/resume-link', canWrite, asyncHandler(async (req, res) => {
+  const token = await store.ensureResumeToken(req.params.id, org(req));
+  if (!token) return res.status(404).json({ error: 'Not found' });
+  res.json({ token, url: resumeUploadUrl(req, token) });
+}));
+
+// Recruiter manually uploads a resume they already have (e.g. an email reply).
+candidatesRouter.post('/:id/resume', canWrite, resumeUpload.single('file'), asyncHandler(async (req, res) => {
+  const c = await store.getCandidate(req.params.id, org(req));
+  if (!c) return res.status(404).json({ error: 'Not found' });
+  const f = req.file;
+  if (!f) return res.status(400).json({ error: 'No file uploaded.' });
+  let text;
+  try {
+    text = await extractDocText(f.buffer, f.originalname, f.mimetype);
+  } catch (e) {
+    return res.status(e.status || 422).json({ error: e.message || 'Couldn’t read that file.' });
+  }
+  if (!text) return res.status(422).json({ error: 'No readable text found in that file.' });
+  const record = buildResumeRecord({ text, filename: f.originalname, size: f.size, mimetype: f.mimetype });
+  const updated = await store.attachResume(c.id, record, org(req));
+  audit(req, 'candidate.resume.upload', { id: c.id, filename: record.filename });
+  res.json({ candidate: updated });
+}));
+
+// View the parsed resume text for a candidate (org-scoped).
+candidatesRouter.get('/:id/resume', asyncHandler(async (req, res) => {
+  const c = await store.getCandidate(req.params.id, org(req));
+  if (!c) return res.status(404).json({ error: 'Not found' });
+  if (!c.resume) return res.status(404).json({ error: 'No resume on file yet.' });
+  res.json({ resume: c.resume });
 }));
 
 // Bulk update (status/star/tags) or delete. Body: { ids: [], patch: {} } or { ids: [], delete: true }.

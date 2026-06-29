@@ -1,6 +1,10 @@
 // MongoDB store — used when MONGODB_URI is set. Same interface as memoryStore.
 import mongoose from 'mongoose';
+import crypto from 'crypto';
 import { normalizeFilters, toMongoQuery } from '../services/candidateFilters.js';
+
+// A long, URL-safe secret for a candidate's public resume-upload link.
+const newResumeToken = () => crypto.randomBytes(18).toString('base64url');
 
 export const PIPELINE_STAGES = ['New', 'Shortlisted', 'Contacted', 'Interviewing', 'Hired', 'Rejected'];
 const EDITABLE = ['status', 'starred', 'notes', 'tags'];
@@ -48,6 +52,16 @@ const candidateSchema = new mongoose.Schema(
     lastContactedAt: Date,
     outreachCount: { type: Number, default: 0 },
     outreachLog: { type: [{ channel: String, subject: String, at: Date }], default: [] },
+    // Resume collection — a per-candidate secret token powers the public upload
+    // link we put in outreach; the parsed CV is attached here once received.
+    resumeToken: { type: String, index: true },
+    resume: {
+      type: {
+        filename: String, size: Number, mimetype: String, text: String,
+        parsedEmail: String, parsedPhone: String, uploadedAt: Date,
+      },
+      default: null,
+    },
   },
   { timestamps: true }
 );
@@ -114,13 +128,26 @@ export const mongoStore = {
     try { await Candidate.collection.dropIndex('dedupeKey_1'); } catch { /* not present → fine */ }
     const set = { $set: { orgId } };
     const where = { $or: [{ orgId: { $exists: false } }, { orgId: null }] };
-    const [c] = await Promise.all([
-      Candidate.updateMany(where, set),
-      Run.updateMany(where, set),
-      Segment.updateMany(where, set),
-      Template.updateMany(where, set),
+    // Runs / segments / templates carry no cross-row unique constraint → bulk is safe.
+    await Promise.all([
+      Run.updateMany(where, set).catch((e) => console.warn('migrate runs:', e.message)),
+      Segment.updateMany(where, set).catch((e) => console.warn('migrate segments:', e.message)),
+      Template.updateMany(where, set).catch((e) => console.warn('migrate templates:', e.message)),
     ]);
-    return { migrated: c.modifiedCount ?? 0 };
+    // Candidates share a per-tenant unique (orgId, dedupeKey). Assigning org-less rows
+    // to the seed org can collide with a row already in that org (or with each other).
+    // Migrate one at a time and DROP any row that would duplicate an existing tenant
+    // candidate — a bulk updateMany aborts the whole startup on the first collision.
+    let migrated = 0;
+    const orphans = await Candidate.find(where).select('_id').lean();
+    for (const o of orphans) {
+      try { await Candidate.updateOne({ _id: o._id }, set); migrated++; }
+      catch (e) {
+        if (e?.code === 11000) await Candidate.deleteOne({ _id: o._id }).catch(() => {});
+        else console.warn('migrate candidate:', e.message);
+      }
+    }
+    return { migrated };
   },
 
   async upsertCandidates(list) {
@@ -238,6 +265,47 @@ export const mongoStore = {
     return out(await Candidate.findOneAndUpdate(scopeId(id, orgId), update, { new: true }));
   },
 
+  // ── Resume collection ──────────────────────────────────────────────────────
+  // Return the candidate's resume-upload token, generating + persisting one on
+  // first use. The token is the secret that authorizes a public upload, so it's
+  // long and random.
+  async ensureResumeToken(id, orgId) {
+    if (!mongoose.isValidObjectId(id)) return null;
+    const c = await Candidate.findOne(scopeId(id, orgId));
+    if (!c) return null;
+    if (!c.resumeToken) { c.resumeToken = newResumeToken(); await c.save(); }
+    return c.resumeToken;
+  },
+
+  // Public lookup by token (NOT org-scoped — the token itself is the credential).
+  async findByResumeToken(token) {
+    if (!token) return null;
+    return out(await Candidate.findOne({ resumeToken: String(token) }));
+  },
+
+  // Attach a parsed resume by candidate id (recruiter upload, org-scoped). Also
+  // backfills email/phone from the CV when we don't already have them.
+  async attachResume(id, resume, orgId) {
+    if (!mongoose.isValidObjectId(id)) return null;
+    const set = { resume };
+    const c = await Candidate.findOne(scopeId(id, orgId));
+    if (!c) return null;
+    if (!c.email && resume.parsedEmail) set.email = resume.parsedEmail;
+    if (!c.phone && resume.parsedPhone) set.phone = resume.parsedPhone;
+    return out(await Candidate.findOneAndUpdate(scopeId(id, orgId), { $set: set }, { new: true }));
+  },
+
+  // Attach a parsed resume by token (public upload — candidate self-serve).
+  async attachResumeByToken(token, resume) {
+    if (!token) return null;
+    const c = await Candidate.findOne({ resumeToken: String(token) });
+    if (!c) return null;
+    const set = { resume };
+    if (!c.email && resume.parsedEmail) set.email = resume.parsedEmail;
+    if (!c.phone && resume.parsedPhone) set.phone = resume.parsedPhone;
+    return out(await Candidate.findOneAndUpdate({ _id: c._id }, { $set: set }, { new: true }));
+  },
+
   async deleteCandidate(id, orgId) {
     if (!mongoose.isValidObjectId(id)) return false;
     return Boolean(await Candidate.findOneAndDelete(scopeId(id, orgId)));
@@ -329,6 +397,9 @@ export const mongoStore = {
     if (!mongoose.isValidObjectId(id)) return null;
     const set = {};
     if (typeof patch.name === 'string') set.name = patch.name;
+    // The agentic critic loop merges extra rounds into ONE session.
+    if (Array.isArray(patch.candidateIds)) set.candidateIds = patch.candidateIds;
+    if (typeof patch.kept === 'number') set.kept = patch.kept;
     return out(await Run.findOneAndUpdate(scopeId(id, orgId), { $set: set }, { new: true }));
   },
   async deleteRun(id, orgId) {

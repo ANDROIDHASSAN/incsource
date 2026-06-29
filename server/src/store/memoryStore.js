@@ -1,6 +1,10 @@
 // In-memory store — used automatically when MONGODB_URI is not set.
 // Same interface as mongoStore so nothing downstream knows the difference.
+import crypto from 'crypto';
 import { normalizeFilters, matchesFilters } from '../services/candidateFilters.js';
+
+// A long, URL-safe secret for a candidate's public resume-upload link.
+const newResumeToken = () => crypto.randomBytes(18).toString('base64url');
 
 export const PIPELINE_STAGES = ['New', 'Shortlisted', 'Contacted', 'Interviewing', 'Hired', 'Rejected'];
 const EDITABLE = ['status', 'starred', 'notes', 'tags'];
@@ -148,6 +152,41 @@ export const memoryStore = {
     return clone(c);
   },
 
+  // ── Resume collection ──────────────────────────────────────────────────────
+  async ensureResumeToken(id, orgId) {
+    const c = candidates.get(String(id));
+    if (!c || !inOrg(c, orgId)) return null;
+    if (!c.resumeToken) c.resumeToken = newResumeToken();
+    return c.resumeToken;
+  },
+
+  // Public lookup by token (NOT org-scoped — the token itself is the credential).
+  async findByResumeToken(token) {
+    if (!token) return null;
+    const c = [...candidates.values()].find((x) => x.resumeToken === String(token));
+    return c ? clone(c) : null;
+  },
+
+  async attachResume(id, resume, orgId) {
+    const c = candidates.get(String(id));
+    if (!c || !inOrg(c, orgId)) return null;
+    c.resume = resume;
+    if (!c.email && resume.parsedEmail) c.email = resume.parsedEmail;
+    if (!c.phone && resume.parsedPhone) c.phone = resume.parsedPhone;
+    c.updatedAt = new Date().toISOString();
+    return clone(c);
+  },
+
+  async attachResumeByToken(token, resume) {
+    const c = [...candidates.values()].find((x) => x.resumeToken === String(token));
+    if (!c) return null;
+    c.resume = resume;
+    if (!c.email && resume.parsedEmail) c.email = resume.parsedEmail;
+    if (!c.phone && resume.parsedPhone) c.phone = resume.parsedPhone;
+    c.updatedAt = new Date().toISOString();
+    return clone(c);
+  },
+
   async deleteCandidate(id, orgId) {
     const c = candidates.get(String(id));
     if (!c || !inOrg(c, orgId)) return false;
@@ -223,6 +262,8 @@ export const memoryStore = {
     const r = runs.find((x) => x.id === String(id));
     if (!r || !inOrg(r, orgId)) return null;
     if (typeof patch.name === 'string') r.name = patch.name;
+    if (Array.isArray(patch.candidateIds)) r.candidateIds = patch.candidateIds;
+    if (typeof patch.kept === 'number') r.kept = patch.kept;
     return clone(r);
   },
   async deleteRun(id, orgId) {

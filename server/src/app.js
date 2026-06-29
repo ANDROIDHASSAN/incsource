@@ -20,6 +20,7 @@ import { settingsRouter } from './routes/settings.js';
 import { usageRouter } from './routes/usage.js';
 import { orgRouter } from './routes/org.js';
 import { agentRouter } from './routes/agent.js';
+import { publicRouter } from './routes/public.js';
 
 // Allowed CORS origins: an explicit allowlist in production (CORS_ORIGIN, comma-
 // separated), or fully open in dev so the Vite dev server / local tools just work.
@@ -57,6 +58,10 @@ export function createApp() {
 
   // Account auth (register / login / me) — public so users can sign in & sign up.
   app.use('/api/auth', authRouter);
+
+  // Candidate-facing resume upload — public by design (authorized by the unguessable
+  // per-candidate token in the link), so it sits OUTSIDE the JWT gate below.
+  app.use('/api/public', publicRouter);
 
   // Everything below requires a signed-in recruiter (valid JWT). The web client
   // attaches the Bearer token to every /api call, so this is transparent to the

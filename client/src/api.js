@@ -64,6 +64,17 @@ export const api = {
     URL.revokeObjectURL(url);
   },
 
+  // ── Resume collection ──
+  // Get (or create) the candidate's public resume-upload link to share in outreach.
+  resumeLink: (id) => fetch(`/api/candidates/${id}/resume-link`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).then(json),
+  // Recruiter manually uploads a resume file → attaches + parses it.
+  uploadResume: (id, file) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    return fetch(`/api/candidates/${id}/resume`, { method: 'POST', body: fd }).then(json);
+  },
+  getResume: (id) => fetch(`/api/candidates/${id}/resume`).then(json),
+
   outreachPreview: (id, body) =>
     fetch(`/api/candidates/${id}/outreach/preview`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(json),
   outreachLog: (id, body) =>
@@ -121,6 +132,21 @@ export const api = {
 
   // agentic assistant — one conversational turn → { reply, brief, ready }
   agentChat: (messages) => fetch('/api/agent/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages }) }).then(json),
+  // Start a REAL background agentic run → { jobId }. Poll agentJob for live state.
+  agentRun: (body) => fetch('/api/agent/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(json),
+  agentJob: (id) => fetch(`/api/agent/jobs/${id}`).then(json),
+  // Voice control (JARVIS): interpret a spoken command, and Whisper STT fallback.
+  voiceCommand: (transcript) => fetch('/api/agent/command', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ transcript }) }).then(json),
+  voiceTranscribe: (blob) => fetch('/api/agent/transcribe', { method: 'POST', headers: { 'Content-Type': blob.type || 'audio/webm' }, body: blob }).then(json),
+  // Neural TTS — returns an audio Blob (WAV) for JARVIS to play. Throws on failure
+  // so the caller can fall back to the browser's on-device voice.
+  voiceSpeak: async (text, voice) => {
+    const res = await fetch('/api/agent/speak', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, voice }),
+    });
+    if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `TTS ${res.status}`);
+    return res.blob();
+  },
 
   // usage / quotas (email daily cap, Apify spend, Groq AI limits)
   usage: () => fetch('/api/usage').then(json),
@@ -144,4 +170,15 @@ export const api = {
   saveSegment: (body) =>
     fetch('/api/segments', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then(json),
   deleteSegment: (id) => fetch(`/api/segments/${id}`, { method: 'DELETE' }).then(json),
+};
+
+// Public (no-auth) endpoints used by the candidate-facing resume upload page.
+// The unguessable token in the link is the only credential needed.
+export const publicApi = {
+  resumeInfo: (token) => fetch(`/api/public/resume/${token}`).then((r) => r.json()),
+  uploadResume: (token, file) => {
+    const fd = new FormData();
+    fd.append('file', file);
+    return fetch(`/api/public/resume/${token}`, { method: 'POST', body: fd }).then((r) => r.json());
+  },
 };

@@ -15,6 +15,9 @@ import { SourcingBrief } from './components/SourcingBrief.jsx';
 import { Settings } from './components/Settings.jsx';
 import { Usage } from './components/Usage.jsx';
 import { Assistant } from './components/Assistant.jsx';
+import { Jarvis } from './components/Jarvis.jsx';
+import { AgentStage } from './components/AgentStage.jsx';
+import { runErrorMessage } from './runError.js';
 
 const initials = (u) => {
   const base = (u?.name || u?.email || '?').trim();
@@ -47,25 +50,6 @@ const EMPTY_FILTERS = {
   indiaOnly: false, hasEmail: false, noticeMaxDays: '', includeLeads: false,
   expMin: '', expMax: '', workMode: '',
 };
-
-// Turn a run's raw source errors into one clear, actionable sentence. The most
-// common real-world failure is the Apify account hitting its monthly spend cap —
-// which 403s every actor, so the run returns 0 and looks (wrongly) like "no
-// candidates exist". Name the real cause so the recruiter knows what to do.
-function runErrorMessage(run) {
-  const errs = run?.errors || [];
-  if (!errs.length) return null;
-  const txt = errs.map((e) => e.message || '').join(' · ');
-  if (/monthly usage hard limit|platform-feature-disabled|usage hard limit exceeded/i.test(txt))
-    return 'Apify monthly usage limit reached — live scraping is paused. Upgrade your Apify plan or add an API token with remaining quota in Tools → API keys (or wait for your Apify billing cycle to reset).';
-  if (/\b401\b|invalid token|authderation|authentication|not authorized|unauthorized/i.test(txt))
-    return 'Apify token was rejected — check or replace your API key in Tools → API keys.';
-  if (/\b402\b|payment required|insufficient/i.test(txt))
-    return 'Apify reported insufficient credit — top up or upgrade your Apify plan to resume live scraping.';
-  if (/timed out|exceeded \d+s/i.test(txt))
-    return 'Sources timed out before returning profiles — try again, or search a simpler role/location.';
-  return `Sources errored (${errs.map((e) => e.source).join(', ')}): ${txt.slice(0, 160)}`;
-}
 
 function toParams(f) {
   const p = {};
@@ -129,8 +113,14 @@ export default function App({ user, onLogout }) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [usageOpen, setUsageOpen] = useState(false);
   const [assistantOpen, setAssistantOpen] = useState(false);
+  const [jarvisOpen, setJarvisOpen] = useState(false);
+  const [jarvisMin, setJarvisMin] = useState(false);
+  // Live agentic orchestration stage (the "Agents are working" takeover): the polled
+  // job + the brief that started it. Set while a voice/agent run is in flight.
+  const [agentJob, setAgentJob] = useState(null);
+  const [agentBrief, setAgentBrief] = useState(null);
   const [aiOn, setAiOn] = useState(false);
-  const [campaignOpen, setCampaignOpen] = useState(false);
+  const [campaign, setCampaign] = useState(null); // { ids, scope:'selected'|'all' } | null
   const [suiteOpen, setSuiteOpen] = useState(false);
   const [toolsOpen, setToolsOpen] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
@@ -349,6 +339,33 @@ export default function App({ user, onLogout }) {
   // selection / bulk
   const toggleSelect = (id) => setSelectedIds((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
   const clearSel = () => setSelectedIds([]);
+
+  // Open the campaign composer for the candidates the user has ticked.
+  const emailSelected = () => setCampaign({ ids: selectedIds, scope: 'selected' });
+
+  // One-click "email everyone in the current view": gather all filtered candidate
+  // ids (capped at the campaign max), respecting an active session, then open the
+  // composer. Only candidates with an email actually receive it (handled server-side).
+  async function emailAllFiltered() {
+    setToolsOpen(false);
+    try {
+      const params = { ...toParams(filters), limit: 500, offset: 0 };
+      const d = activeSession ? await api.sessionCandidates(activeSession.id, params) : await api.candidates(params);
+      const ids = (d.candidates || []).map((c) => c.id);
+      if (!ids.length) { toast('No candidates in the current view to email', 'err'); return; }
+      setCampaign({ ids, scope: 'all' });
+    } catch { toast('Could not load the list to email', 'err'); }
+  }
+
+  // Prefill the campaign's role + requirements from the active session's brief.
+  const campaignDefaults = () => {
+    const b = activeSession?.brief || lastRun?.brief || {};
+    const role = activeSession?.query || lastRun?.query || b.role || '';
+    const reqBits = [];
+    if (Array.isArray(b.skills) && b.skills.length) reqBits.push(b.skills.join(', '));
+    if (b.expMin != null || b.expMax != null) reqBits.push(`${b.expMin ?? 0}${b.expMax != null ? `–${b.expMax}` : '+'} yrs`);
+    return { defaultRole: role, defaultRequirements: reqBits.join(' · ') };
+  };
   // Select-all (real candidates only — job-leads aren't contactable people).
   const selectableIds = candidates.filter((c) => c.recordType !== 'job-lead').map((c) => c.id);
   const allSelected = selectableIds.length > 0 && selectableIds.every((id) => selectedIds.includes(id));
@@ -402,6 +419,94 @@ export default function App({ user, onLogout }) {
   async function deleteSegment(id) {
     await api.deleteSegment(id);
     setSegments((s) => s.filter((x) => x.id !== id));
+  }
+
+  // ── JARVIS voice control ──────────────────────────────────────────────
+  // Poll a background agentic job to completion, calling onTick with every
+  // snapshot so the live orchestration stage + candidate list update in real time.
+  async function pollAgentJob(jobId, onTick, maxMs = 150000) {
+    const t0 = Date.now();
+    let last = null;
+    while (Date.now() - t0 < maxMs) {
+      const job = await api.agentJob(jobId).catch(() => null);
+      if (job && job.status) { last = job; onTick?.(job); if (job.status !== 'running') return job; }
+      await new Promise((r) => setTimeout(r, 600));
+    }
+    return last;
+  }
+  function closeAgentStage() { setAgentJob(null); setAgentBrief(null); }
+
+  // Execute a structured voice action; return a spoken string when JARVIS should
+  // say something data-driven (otherwise undefined → it speaks the brain's reply).
+  async function handleVoiceCommand({ action, params = {} }) {
+    if (action === 'source') {
+      const brief = params.brief || {};
+      // Minimize JARVIS and bring up the live orchestration stage so the user WATCHES
+      // the agent team work (per the chosen UX), with candidates streaming into the list.
+      setRunError(null); setFreshSession(false); setActiveSession(null); setLastRun(null);
+      clearSel(); setCandidates([]); setTotal(0);
+      setAgentBrief(brief);
+      setJarvisMin(true);
+      try {
+        const { jobId } = await api.agentRun({ brief, sources: selected });
+        if (!jobId) { setJarvisMin(false); return 'I couldn’t start the run — please try again.'; }
+        const job = await pollAgentJob(jobId, (j) => {
+          setAgentJob(j);
+          if (Array.isArray(j.candidates)) { setCandidates(j.candidates); setTotal(j.candidates.length); }
+        });
+        loadSessions();
+        const run = job?.result?.run;
+        if (run) { setFreshSession(false); setActiveSession(run); setLastRun(run); api.stats().then(setStats); }
+        const kept = job?.result?.kept || 0;
+        const strong = job?.result?.strongMatches || 0;
+        // Leave the stage up briefly so the final state is visible, then settle to the list.
+        setTimeout(closeAgentStage, kept ? 2600 : 1200);
+        if (!kept) {
+          const why = runErrorMessage(run);
+          return why
+            ? `I couldn't pull candidates — ${why}`
+            : `I searched ${brief.city || 'there'} but found no exact matches. Try a nearby city or a wider experience range.`;
+        }
+        return `Done. The team sourced ${kept} ${brief.role || 'candidate'}${kept === 1 ? '' : 's'}${brief.city ? ` in ${brief.city}` : ''}${strong ? `, ${strong} a strong match` : ''}. They're in your list now.`;
+      } catch { closeAgentStage(); setJarvisMin(false); return 'The run hit a snag — please try again.'; }
+    }
+    if (action === 'filter') {
+      if (params.clear) { setFilters(EMPTY_FILTERS); return 'Filters cleared.'; }
+      const patch = {};
+      if (params.band) patch.band = params.band === 'all' ? '' : params.band;
+      if (params.openToWork) patch.openToWork = true;
+      if (params.hasEmail) patch.hasEmail = true;
+      if (params.starred) patch.starred = true;
+      if (typeof params.query === 'string' && params.query) patch.q = params.query;
+      setF(patch);
+      return undefined;
+    }
+    if (action === 'summarize') {
+      const list = candidates;
+      if (!list.length) return 'There are no candidates on screen yet. Tell me who to source.';
+      const hot = list.filter((c) => (c.fitScore ?? c.activeScore ?? 0) >= 70).length;
+      const otw = list.filter((c) => c.openToWork).length;
+      const top = list[0];
+      return `You have ${list.length} candidate${list.length === 1 ? '' : 's'} on screen — ${hot} hot and ${otw} open to work. The top match is ${top.fullName}, a ${top.currentTitle || 'candidate'}${top.city ? ` in ${top.city}` : ''}.`;
+    }
+    if (action === 'usage') {
+      try {
+        const u = await api.usage();
+        const e = u.email || {};
+        return `You've sent ${e.sentToday || 0} of ${e.dailyCap || 0} emails today, with ${e.remaining ?? 0} remaining. Apify is ${apifyMode === 'live' ? 'live' : 'in sample mode'}.`;
+      } catch { return 'I couldn’t reach the usage data right now.'; }
+    }
+    if (action === 'navigate') {
+      const p = params.panel;
+      if (p === 'jd') setJdOpen(true);
+      else if (p === 'templates') setTplOpen(true);
+      else if (p === 'settings') setSettingsOpen(true);
+      else if (p === 'usage') setUsageOpen(true);
+      else if (p === 'assistant') setAssistantOpen(true);
+      else if (p === 'new') newSession();
+      return undefined;
+    }
+    return undefined; // 'say' / 'stop' → JARVIS speaks the brain's reply
   }
 
   // sessions (ChatGPT-style: each search is a session with its own candidate history)
@@ -472,6 +577,7 @@ export default function App({ user, onLogout }) {
         </div>
         <div className="appbar-right">
           <SessionsMenu sessions={sessions} active={activeSession} onNew={newSession} onOpen={openSession} onExit={exitSession} onRename={renameSession} onDelete={deleteSession} />
+          <button className="btn sm primary jarvis-btn" onClick={() => setJarvisOpen(true)} title="Hands-free voice control">🎙 JARVIS</button>
           <button className="btn sm primary assistant-btn" onClick={() => setAssistantOpen(true)}>✦ Ask AI</button>
           <button className="btn sm primary jd-btn" onClick={() => setJdOpen(true)}>✦ Match to JD</button>
           {/* Secondary tools tucked under one menu to keep the bar clean */}
@@ -479,6 +585,7 @@ export default function App({ user, onLogout }) {
             <button className="btn sm">⋯ Tools <span className="chev">▾</span></button>
             {toolsOpen && (
               <div className="tools-menu" onClick={(e) => e.stopPropagation()}>
+                <button className="tools-item" onClick={emailAllFiltered}>✉ Email all (current view)</button>
                 <button className="tools-item" onClick={() => { setSettingsOpen(true); setToolsOpen(false); }}>🔑 API keys</button>
                 <button className="tools-item" onClick={() => { setTplOpen(true); setToolsOpen(false); }}>✉ Email templates</button>
                 <button className="tools-item" onClick={() => { exportCsv(); setToolsOpen(false); }}>↓ Export CSV</button>
@@ -595,7 +702,7 @@ export default function App({ user, onLogout }) {
             onStatus={bulkStatus}
             onStar={bulkStar}
             onEnrich={bulkEnrich}
-            onEmail={() => setCampaignOpen(true)}
+            onEmail={emailSelected}
             enriching={enriching}
             onExport={() => exportCsv(selectedIds)}
             onDelete={bulkDelete}
@@ -622,7 +729,7 @@ export default function App({ user, onLogout }) {
             ) : (
               candidates.map((c, i) => (
                 <CandidateCard
-                  key={c.id} c={c} index={i} sourceMeta={SOURCE_META}
+                  key={c.id || c.externalId || c.dedupeKey || `row-${i}`} c={c} index={i} sourceMeta={SOURCE_META}
                   selected={selectedIds.includes(c.id)} onToggleSelect={toggleSelect}
                   onOpen={setModalC} onStar={quickStar}
                   onContact={quickContact} onFindEmail={quickFindEmail}
@@ -649,15 +756,64 @@ export default function App({ user, onLogout }) {
         <Settings onClose={() => setSettingsOpen(false)} onSaved={(s) => setAiOn(Boolean(s.ai))} toast={toast} />
       )}
       {usageOpen && <Usage onClose={() => setUsageOpen(false)} toast={toast} />}
+      {agentJob && (
+        <div className="stage-takeover">
+          <AgentStage job={agentJob} brief={agentBrief} onClose={closeAgentStage} />
+        </div>
+      )}
+      {jarvisOpen && (
+        <Jarvis
+          onClose={() => { setJarvisOpen(false); setJarvisMin(false); }}
+          onCommand={handleVoiceCommand}
+          toast={toast}
+          minimized={jarvisMin}
+          onRestore={() => setJarvisMin(false)}
+        />
+      )}
       {assistantOpen && (
         <Assistant
           sources={selected}
           toast={toast}
           onClose={() => setAssistantOpen(false)}
+          onRunStart={(brief) => {
+            // The assistant kicked off a run — clear the canvas and switch the main
+            // list into live-streaming mode so candidates appear one by one as the
+            // agents find them (same UX as the left-panel run, no takeover screen).
+            setRunError(null);
+            setFreshSession(false);
+            setActiveSession(null);
+            setLastRun(null);
+            clearSel();
+            setCandidates([]); setTotal(0);
+            setRunning(true);
+            setProgress({ phase: 'Starting the agent run…', scanned: 0, kept: 0, target: Number(brief?.count) || 0, sources: {} });
+          }}
+          onLive={(live) => {
+            // Stream the agents' growing candidate pool straight into the list.
+            if (Array.isArray(live.candidates)) {
+              setCandidates(live.candidates);
+              setTotal(live.candidates.length);
+            }
+            setProgress((p) => (p ? {
+              ...p,
+              phase: live.phase || p.phase,
+              kept: live.kept ?? (live.candidates ? live.candidates.length : p.kept),
+              scanned: live.scanned ?? p.scanned,
+              target: live.target || p.target,
+              sources: live.sources && Object.keys(live.sources).length ? live.sources : p.sources,
+            } : p));
+          }}
           onComplete={(run) => {
-            // The agent finished a run — surface its results in the main view.
+            // Run finished — settle the view onto the saved session's candidates.
+            setRunning(false);
+            setProgress(null);
             loadSessions();
-            if (run) { setFreshSession(false); setActiveSession(run); setLastRun(run); }
+            if (run) {
+              setFreshSession(false);
+              setFilters((f) => ({ ...f, expMin: '', expMax: '' }));
+              setActiveSession(run);
+              setLastRun(run);
+            }
             api.stats().then(setStats);
           }}
         />
@@ -665,8 +821,17 @@ export default function App({ user, onLogout }) {
       {tplOpen && (
         <TemplateManager templates={templates} onChange={loadTemplates} onClose={() => setTplOpen(false)} toast={toast} />
       )}
-      {campaignOpen && (
-        <CampaignModal ids={selectedIds} templates={templates} onClose={() => setCampaignOpen(false)} onDone={() => { clearSel(); refreshData(); }} toast={toast} />
+      {campaign && (
+        <CampaignModal
+          ids={campaign.ids}
+          scope={campaign.scope}
+          templates={templates}
+          {...campaignDefaults()}
+          onTemplatesChanged={loadTemplates}
+          onClose={() => setCampaign(null)}
+          onDone={() => { if (campaign.scope === 'selected') clearSel(); refreshData(); }}
+          toast={toast}
+        />
       )}
       {jdOpen && (
         <JDMatch

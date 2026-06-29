@@ -35,11 +35,33 @@ export const TEMPLATES = [
       'whenever you have a few minutes.\n\n' +
       'Best,\n{{recruiter}}',
   },
+  {
+    id: 'resume',
+    name: 'Resume request',
+    subject: '{{role}} role — share your resume, {{firstName}}?',
+    body:
+      'Hi {{firstName}},\n\n' +
+      'I came across your profile{{experienceLine}} and think you could be a strong fit for a {{role}} role we’re hiring for.\n\n' +
+      'What we’re looking for:\n{{requirements}}\n\n' +
+      'If this sounds interesting, could you share your latest resume here? It takes a few seconds:\n{{resumeLink}}\n\n' +
+      'Looking forward to it,\n{{recruiter}}',
+  },
 ];
+
+// Human phrase for a candidate's experience, used in personalized outreach.
+// "6 years of experience", "around 2 years", or '' when unknown.
+export function experiencePhrase(candidate = {}) {
+  const y = candidate.experienceYears;
+  if (y == null || Number.isNaN(Number(y))) return '';
+  const n = Number(y);
+  if (n <= 0) return '';
+  return `${n} year${n === 1 ? '' : 's'} of experience`;
+}
 
 export function renderTemplate(tpl, candidate, ctx = {}) {
   const first = (candidate.fullName || '').split(' ')[0] || 'there';
   const skills = (candidate.skills || []).slice(0, 3).join(', ');
+  const exp = experiencePhrase(candidate);
   const vars = {
     firstName: first,
     name: candidate.fullName || 'there',
@@ -47,6 +69,16 @@ export function renderTemplate(tpl, candidate, ctx = {}) {
     company: ctx.company || 'our team',
     recruiter: ctx.recruiter || 'The InCruiter team',
     skillLine: skills ? ` with ${skills}` : '',
+    // Their experience — both a bare value ({{experience}} → "6 years of experience")
+    // and a sentence-fragment form ({{experienceLine}} → " — I see you have 6 years…")
+    // so templates can drop it in naturally.
+    experience: exp,
+    experienceLine: exp ? ` — I see you have ${exp}` : '',
+    // Our requirements / JD, as typed by the recruiter for this campaign.
+    requirements: ctx.requirements ? String(ctx.requirements).trim() : 'a strong match for your background',
+    // Per-candidate public resume-upload link (set by the email route when the
+    // recruiter asks to collect resumes). Empty string when not requested.
+    resumeLink: ctx.resumeLink || '',
   };
   const fill = (s) => s.replace(/\{\{(\w+)\}\}/g, (_, k) => vars[k] ?? '');
   return { subject: fill(tpl.subject), body: fill(tpl.body) };

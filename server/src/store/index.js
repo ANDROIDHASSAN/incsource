@@ -43,7 +43,12 @@ async function startLocalMongo() {
   // We only reach here when nothing is serving on the port, so a leftover lock is
   // stale — clear it so a hard-killed previous run can't block startup.
   try { fs.rmSync(path.join(LOCAL_DB_PATH, 'mongod.lock'), { force: true }); } catch { /* ignore */ }
+  // Pin a known-good mongod build. The auto-selected latest (8.2.x) crashes on
+  // start on some Windows machines (it leaves .mdmp dumps → "failed to start
+  // within 10s"), so we use 7.0.14, which runs reliably and is already cached.
+  const localMongoVersion = process.env.LOCAL_MONGO_VERSION || '7.0.14';
   memServer = await MongoMemoryServer.create({
+    binary: { version: localMongoVersion },
     instance: { port: LOCAL_DB_PORT, dbName: 'incsource', dbPath: LOCAL_DB_PATH, storageEngine: 'wiredTiger' },
   });
   return memServer.getUri('incsource');

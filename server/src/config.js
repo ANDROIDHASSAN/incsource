@@ -65,6 +65,11 @@ export const config = {
   groq: {
     key: process.env.GROQ_API_KEY || null,
     model: process.env.GROQ_MODEL || 'llama-3.3-70b-versatile',
+    // Neural text-to-speech (Orpheus on GroqCloud) — gives JARVIS a real human voice
+    // instead of the robotic browser SpeechSynthesis, and works on every browser.
+    // English voices: autumn, diana, hannah, austin, daniel, troy.
+    ttsModel: process.env.GROQ_TTS_MODEL || 'canopylabs/orpheus-v1-english',
+    ttsVoice: process.env.GROQ_TTS_VOICE || 'austin',
   },
 
   // Auth — JWT signing. Set AUTH_SECRET in production; dev gets a stable default.

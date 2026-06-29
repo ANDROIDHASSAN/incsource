@@ -8,6 +8,7 @@ import { enrichOpenToWork } from './enrichOpenToWork.js';
 import { enrichContacts } from './enrichContacts.js';
 import { config, usingAI } from '../config.js';
 import { isIndian, countryCodeOf, countryName, matchesCountry } from './geo.js';
+import { CITY_TO_STATE } from '../data/indiaGeo.js';
 import { parseActorId, makeCustomProvider } from '../providers/customApifyProvider.js';
 
 // Over-fetch multiplier — we pull this many × the target across sources so that
@@ -57,7 +58,7 @@ const normGeo = (s) => String(s || '').toLowerCase().replace(/[^a-z]/g, '').repl
 // passed, `state` (region-wide). The fill logic relaxes city → state → anywhere when
 // a tight city would otherwise return too few, so the recruiter sees nearby talent
 // instead of an empty list.
-function applyAudience(list, { countryCode, openToWorkOnly, expMin, expMax, workMode, city, state }) {
+function applyAudience(list, { countryCode, openToWorkOnly, expMin, expMax, workMode, city, state, tightExp = false }) {
   let pool = list;
   let droppedNonIndia = 0;
   let droppedNotOpen = 0;
@@ -115,8 +116,12 @@ function applyAudience(list, { countryCode, openToWorkOnly, expMin, expMax, work
   // won't surface a 15-yr veteran, but a genuine open-to-work 2-yr junior is never
   // wrongly dropped (the band-edge strictness was the bug). Works for every band.
   if (expMin != null || expMax != null) {
-    const lo = expMin != null ? Math.max(0, expMin - 1) : null;
-    const hi = expMax != null ? expMax + 2 : null;
+    // Lenient by default (keeps band-edge people); TIGHT in strict mode so the
+    // assistant honours the exact band the user asked for (e.g. 1–3 yrs stays 1–3).
+    const padLo = tightExp ? 0 : 1;
+    const padHi = tightExp ? 0 : 2;
+    const lo = expMin != null ? Math.max(0, expMin - padLo) : null;
+    const hi = expMax != null ? expMax + padHi : null;
     const before = pool.length;
     pool = pool.filter(
       (c) =>
@@ -217,6 +222,11 @@ export async function runSourcing({
   indiaOnly = true,
   countryOnly = true,
   workMode = 'any',
+  // STRICT mode (used by the AI assistant): return ONLY candidates that match the
+  // requested location AND experience — never widen city→state→country or relax the
+  // experience band to pad the count. We'd rather hand back an honest "3 of 8 in
+  // Nashik" than 5 random all-India profiles. The main dashboard run stays lenient.
+  strict = false,
   findContacts = false,
   sessionName = '',
   customActor = '',
@@ -227,6 +237,10 @@ export async function runSourcing({
   // Falls back to the legacy indiaOnly flag for older clients.
   const countryCode = countryOnly ? (countryCodeOf(country) ?? (indiaOnly ? 'IN' : null)) : null;
   const searchCountry = countryName(countryCode) || (countryCodeOf(country) ? countryName(countryCodeOf(country)) : null) || 'India';
+  // Backfill the state from a known city (e.g. Nashik → Maharashtra) so the geo
+  // gate, in-region fill and the session label all have the right region even when
+  // the caller only supplied a city.
+  if (city && !state) state = CITY_TO_STATE[String(city).trim().toLowerCase()] || '';
   // Build the most specific location string we can from structured inputs.
   location = [city, state, country].filter(Boolean).join(', ') || location || searchCountry;
   // Keep the search query sane — a long pasted sentence makes actors hang or
@@ -289,7 +303,7 @@ export async function runSourcing({
   // The band drives the title SEARCH (biasQueryForExperience) + a LENIENT years
   // filter (applyAudience) that only drops clear mismatches — never band-edge juniors.
   let { pool, droppedNonIndia, droppedNotOpen, droppedExp } = applyAudience(collected, {
-    countryCode, openToWorkOnly, expMin, expMax, workMode, city,
+    countryCode, openToWorkOnly, expMin, expMax, workMode, city, tightExp: strict,
   });
   let deduped = dedupeBatch(pool);
   emit('candidates', { kept: deduped.length, scanned: fetched, candidates: snapshot(pool) });
@@ -309,10 +323,12 @@ export async function runSourcing({
   // while staying in-region (a Nashik search prefers a 4y Maharashtra dev over an
   // out-of-state fresher). open-to-work is never relaxed here when it was requested.
   const refilterWith = ({ otw, wm, geo = 'city', exp = true }, note) => {
+    // In strict mode we never leave the requested city or relax the band.
+    if (strict) { geo = city ? 'city' : geo; exp = true; }
     const geoArgs = geo === 'state' ? { state } : geo === 'any' ? {} : { city };
     const { pool: p } = applyAudience(allRaw, {
       countryCode, openToWorkOnly: otw, expMin: exp ? expMin : null, expMax: exp ? expMax : null,
-      workMode: wm ? workMode : 'any', ...geoArgs,
+      workMode: wm ? workMode : 'any', ...geoArgs, tightExp: strict,
     });
     const merged = dedupeBatch(p);
     if (merged.length > deduped.length) {
@@ -357,7 +373,8 @@ export async function runSourcing({
   //    `otw: openToWorkOnly` keeps the open-to-work gate ON through every fill
   //    pass whenever the recruiter requested it. ──
   // 1) relax work-mode (a genuinely soft preference) — but keep open-to-work intact.
-  if (want() && workMode !== 'any') refilterWith({ otw: openToWorkOnly, exp: true, wm: false }, 'work-mode');
+  //    Strict runs honour the requested work mode too.
+  if (!strict && want() && workMode !== 'any') refilterWith({ otw: openToWorkOnly, exp: true, wm: false }, 'work-mode');
 
   // ── Only if STILL short, spend on broader fetches (live sources only) ──
   if (city) {
@@ -369,32 +386,38 @@ export async function runSourcing({
     // staying in-region: same-state at the requested seniority first, then same-state
     // with relaxed seniority (a 4y Maharashtra dev beats an out-of-state fresher for
     // a "Nashik" search), before we ever leave the state.
-    if (want() && state) {
+    // FREE nearby-state surfacing (lenient runs only — strict never leaves the city).
+    if (!strict && want() && state) {
       refilterWith({ otw: openToWorkOnly, exp: true, wm: false, geo: 'state' }, `nearby ${state}`);
     }
-    if (want() && state) {
+    if (!strict && want() && state) {
       refilterWith({ otw: openToWorkOnly, exp: false, wm: false, geo: 'state' }, `nearby ${state}`);
     }
     // Fan out alternate titles in the SAME region to surface more local matches
     // (e.g. a fresher search: "Associate developer", "Trainee developer", "Graduate …").
+    // STRICT-SAFE: refilterWith forces the city gate + exact band when strict, so this
+    // only ever adds MORE exact-city, in-band people — never out-of-city padding.
     const variants = (expMax != null && expMax <= 3) ? juniorTitleVariants(query)
       : (expMin != null && expMin >= 5) ? seniorTitleVariants(query)
       : roleVariants(query);
-    const cityFillGeo = state ? 'state' : 'any';
+    const cityFillGeo = strict ? 'city' : (state ? 'state' : 'any');
     for (const v of variants) {
       if (!want() || timeLeft() < 22_000) break;
       await widenAndRefill(location, { otw: openToWorkOnly, exp: true, wm: false, geo: cityFillGeo }, state ? `nearby ${state}` : 'title', v);
     }
-    // STILL short → widen the SEARCH to the whole state, then country, keeping the
-    // region (state) gate so results stay relevant — better than an empty session.
-    if (want()) await tryLoc(stateLoc, { otw: openToWorkOnly, exp: true, wm: false, geo: cityFillGeo }, state ? `nearby ${state}` : 'location');
-    if (want()) await tryLoc(searchCountry, { otw: openToWorkOnly, exp: true, wm: false, geo: 'any' }, 'location');
-    // FREE final pass: the city/state searches above also pulled some out-of-region
-    // profiles into allRaw. If we're still short (and a live re-fetch returned
-    // nothing new), surface those country-wide matches we already have rather than
-    // leaving the recruiter short — relevance is preserved by the city-first sort.
-    if (want()) refilterWith({ otw: openToWorkOnly, exp: true, wm: false, geo: 'any' }, 'location');
-  } else {
+    // ── Below this point we WIDEN beyond the requested city — lenient runs only ──
+    if (!strict) {
+      // STILL short → widen the SEARCH to the whole state, then country, keeping the
+      // region (state) gate so results stay relevant — better than an empty session.
+      if (want()) await tryLoc(stateLoc, { otw: openToWorkOnly, exp: true, wm: false, geo: cityFillGeo }, state ? `nearby ${state}` : 'location');
+      if (want()) await tryLoc(searchCountry, { otw: openToWorkOnly, exp: true, wm: false, geo: 'any' }, 'location');
+      // FREE final pass: the city/state searches above also pulled some out-of-region
+      // profiles into allRaw. If we're still short (and a live re-fetch returned
+      // nothing new), surface those country-wide matches we already have rather than
+      // leaving the recruiter short — relevance is preserved by the city-first sort.
+      if (want()) refilterWith({ otw: openToWorkOnly, exp: true, wm: false, geo: 'any' }, 'location');
+    }
+  } else if (!strict) {
     // 3) widen location within the SELECTED country (state → whole country)
     if (want()) await tryLoc(stateLoc, { otw: openToWorkOnly, exp: true, wm: false }, 'location');
     if (want()) await tryLoc(searchCountry, { otw: openToWorkOnly, exp: true, wm: false }, 'location');
@@ -413,7 +436,7 @@ export async function runSourcing({
   // exactly still surfaces the nearby state/country talent we already fetched,
   // instead of a frustrating empty session. (If open-to-work-only genuinely matched
   // nobody, we still respect it — that's an honest zero, not a geo problem.)
-  if (deduped.length === 0 && allRaw.length) {
+  if (!strict && deduped.length === 0 && allRaw.length) {
     for (const geo of ['state', 'any']) {
       const geoArgs = geo === 'state' ? { state } : {};
       if (geo === 'state' && !state) continue;

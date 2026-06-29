@@ -4,9 +4,18 @@ import { config } from '../config.js';
 import { asyncHandler, rateLimit, requireRole } from '../middleware/index.js';
 import { TEMPLATES, renderTemplate } from '../services/outreach.js';
 import { sendEmail, emailStatus } from '../services/emailService.js';
+import { resumeUploadUrl } from '../services/appUrl.js';
 import { usage, emailCap, emailRemaining } from '../services/usage.js';
 
 export const emailRouter = Router();
+
+// Build the candidate's public resume-upload link, creating the token on first use.
+// Returns '' when the recruiter didn't ask to collect resumes for this campaign.
+async function resumeLinkFor(req, candidate, wantResume) {
+  if (!wantResume) return '';
+  const token = await store.ensureResumeToken(candidate.id, req.user.orgId);
+  return token ? resumeUploadUrl(req, token) : '';
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // A randomized gap between sends so a campaign doesn't go out as one suspicious
@@ -19,8 +28,9 @@ emailRouter.get('/status', asyncHandler(async (_req, res) => {
 }));
 
 // Resolve { subject, body } from a templateId (built-in or this org's custom) or
-// raw subject/body, then personalize for the candidate.
-async function compose(body, candidate, orgId) {
+// raw subject/body, then personalize for the candidate. `extra` carries the
+// per-candidate resume link and the campaign-wide requirements text.
+async function compose(body, candidate, orgId, extra = {}) {
   let tpl;
   if (body.subject != null || body.body != null) {
     tpl = { subject: body.subject || '', body: body.body || '' };
@@ -28,7 +38,10 @@ async function compose(body, candidate, orgId) {
     const all = [...TEMPLATES, ...(await store.listTemplates(orgId))];
     tpl = all.find((t) => t.id === body.templateId) || TEMPLATES[0];
   }
-  return renderTemplate(tpl, candidate, { role: body.role, recruiter: body.recruiter, company: body.company });
+  return renderTemplate(tpl, candidate, {
+    role: body.role, recruiter: body.recruiter, company: body.company,
+    requirements: body.requirements, resumeLink: extra.resumeLink || '',
+  });
 }
 
 // Send to a single candidate.
@@ -41,7 +54,8 @@ emailRouter.post('/send/:id', canSend, rateLimit({ windowMs: 60_000, max: 60 }),
     return res.status(429).json({ error: `Daily email limit reached (${emailCap()}/day). Resets tomorrow — protects your sending account from being flagged.` });
   }
 
-  const msg = await compose(req.body || {}, c, req.user.orgId);
+  const resumeLink = await resumeLinkFor(req, c, req.body?.resumeRequest);
+  const msg = await compose(req.body || {}, c, req.user.orgId, { resumeLink });
   const result = await sendEmail({ to: c.email, subject: msg.subject, text: msg.body });
   if (!result.ok) return res.status(502).json({ error: result.error });
   usage.incEmail();
@@ -70,7 +84,8 @@ emailRouter.post('/campaign', canSend, rateLimit({ windowMs: 60_000, max: 4 }), 
 
   for (const c of withEmail) {
     if (remaining <= 0) { capped++; results.push({ id: c.id, name: c.fullName, status: 'capped', reason: 'daily limit' }); continue; }
-    const msg = await compose(req.body || {}, c, req.user.orgId);
+    const resumeLink = await resumeLinkFor(req, c, req.body?.resumeRequest);
+    const msg = await compose(req.body || {}, c, req.user.orgId, { resumeLink });
     const r = await sendEmail({ to: c.email, subject: msg.subject, text: msg.body });
     if (r.ok) {
       usage.incEmail();

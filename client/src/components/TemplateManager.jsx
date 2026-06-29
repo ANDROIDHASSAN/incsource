@@ -24,7 +24,7 @@ export function TemplateManager({ templates, onChange, onClose, toast }) {
     setSaving(true);
     try {
       if (form.id) await api.updateTemplate(form.id, form);
-      else { const t = await api.createTemplate(form); setSel(t.id); }
+      else { const t = await api.createTemplate(form); setForm((f) => ({ ...f, id: t.id })); setSel(t.id); }
       await onChange();
       toast('Template saved', 'ok');
     } finally { setSaving(false); }

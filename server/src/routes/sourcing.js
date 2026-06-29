@@ -20,11 +20,14 @@ const canSource = requireRole('recruiter');
 function briefFromBody(req) {
   const body = req.body || {};
   const cleanNum = (v) => (v === '' || v == null ? null : Number(v));
-  const { sources, query, limit, count, records, location, openToWorkOnly, indiaOnly, countryOnly, findContacts, sessionName, city, state, country, expMin, expMax, skills, jd, customActor, workMode } = body;
+  const { sources, query, limit, count, records, location, openToWorkOnly, indiaOnly, countryOnly, findContacts, sessionName, city, state, country, expMin, expMax, skills, jd, customActor, workMode, strict } = body;
   return {
     orgId: req.user.orgId,
     customActor: typeof customActor === 'string' ? customActor.slice(0, 300) : '',
     workMode: ['remote', 'hybrid', 'onsite'].includes(workMode) ? workMode : 'any',
+    // STRICT mode: only fetch exactly what was asked (location + experience), no
+    // widening. The AI assistant sends this so its runs match the user's request.
+    strict: strict === true,
     sources,
     query,
     limit: Math.min(Number(limit) || 25, 100),

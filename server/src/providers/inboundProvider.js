@@ -57,6 +57,11 @@ export const inboundProvider = {
       profileUrl: raw.profileUrl || null,
       noticePeriodDays: raw.noticePeriodDays ?? null,
       appliedToJob: raw.appliedToJob || null,
+      // Honour an explicit open-to-work flag from the ATS/opt-in record. Applicants
+      // are already treated as open via appliedToJob; this also lets a source mark
+      // someone open-to-work without a specific application (otherwise the signal
+      // was silently dropped here and the open-to-work gate would miss them).
+      openToWork: raw.openToWork ?? undefined,
       lastActiveAt: raw.lastActiveAt || null,
       rawSignals: ['inbound-application'],
     };

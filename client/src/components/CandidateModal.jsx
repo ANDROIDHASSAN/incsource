@@ -17,6 +17,28 @@ export function CandidateModal({ candidate, meta, templates = [], sourceMeta, on
   const [role, setRole] = useState(candidate.currentTitle || '');
   const [enriching, setEnriching] = useState(false);
   const [sending, setSending] = useState(false);
+  const [uploadingResume, setUploadingResume] = useState(false);
+
+  async function uploadResume(file) {
+    setUploadingResume(true);
+    try {
+      const res = await api.uploadResume(c.id, file);
+      if (res.error) { toast(res.error, 'err'); return; }
+      setC(res.candidate);
+      onUpdate(res.candidate);
+      toast('Resume attached ✓', 'ok');
+    } catch { toast('Resume upload failed', 'err'); }
+    finally { setUploadingResume(false); }
+  }
+
+  async function copyResumeLink() {
+    try {
+      const res = await api.resumeLink(c.id);
+      if (res.error || !res.url) { toast(res.error || 'Could not create link', 'err'); return; }
+      await navigator.clipboard.writeText(res.url);
+      toast('Resume-upload link copied — send it to the candidate', 'ok');
+    } catch { toast('Could not copy link', 'err'); }
+  }
 
   async function sendNow() {
     if (!c.email) { toast('No email — run Find email first', 'err'); return; }
@@ -171,6 +193,28 @@ export function CandidateModal({ candidate, meta, templates = [], sourceMeta, on
                 <div className="chips">{c.skills.map((s) => <span key={s} className="chip">{s}</span>)}</div>
               </section>
             )}
+
+            <section className="m-sec">
+              <h4>Resume</h4>
+              {c.resume ? (
+                <div className="resume-on">
+                  <div className="resume-file">📄 <b>{c.resume.filename}</b> <span className="muted sm">· received {new Date(c.resume.uploadedAt).toLocaleDateString()}</span></div>
+                  {(c.resume.parsedEmail || c.resume.parsedPhone) && (
+                    <p className="muted sm">From CV: {c.resume.parsedEmail || ''}{c.resume.parsedEmail && c.resume.parsedPhone ? ' · ' : ''}{c.resume.parsedPhone || ''}</p>
+                  )}
+                  <details className="tpl-preview"><summary>View parsed text</summary><pre>{c.resume.text}</pre></details>
+                </div>
+              ) : (
+                <p className="muted sm">No resume yet. Copy the candidate’s upload link into your outreach, or upload one you already received.</p>
+              )}
+              <div className="resume-actions">
+                <label className="btn sm file-btn">
+                  {uploadingResume ? 'Uploading…' : (c.resume ? 'Replace file' : '↑ Upload resume')}
+                  <input type="file" accept=".pdf,.docx,.doc,.txt" hidden disabled={uploadingResume} onChange={(e) => e.target.files[0] && uploadResume(e.target.files[0])} />
+                </label>
+                <button className="btn sm" onClick={copyResumeLink}>🔗 Copy upload link</button>
+              </div>
+            </section>
 
             <section className="m-sec">
               <h4>Recruiter notes</h4>
